@@ -1,0 +1,177 @@
+---
+title: "R Notebook"
+output:
+  html_document:
+    df_print: paged
+---
+
+The purpose of this notebook is to load in RNAseq analysis (output of the cuffdiff pipeline) into Rstudio:
+- visually explore the data (MDS plots, hierarchical clustering, etc) using the 'CummRbund' package
+- extract differentially regulated genes between two samples and perform Pathway enrichment using Clusterprofiler
+- extract differentially regulated genes between multiple samples and perform Pathway enrichment using Clusterprofiler
+
+http://bioconductor.org/packages/release/bioc/vignettes/clusterProfiler/inst/doc/clusterProfiler.html
+
+here's a link to the CummRbund package - pretty outdated but that's what we use in the lab
+http://compbio.mit.edu/cummeRbund/manual_2_0.html
+
+
+```{r}
+
+source("https://bioconductor.org/biocLite.R")
+biocLite(c("cummeRbund", "RSQLite", "Gviz", "Hmisc", "ReactomePA", "org.Mm.eg.db", "biomaRt", "clusterProfiler","Rcpp","annotate" , "ggplot2"))
+
+
+library(org.Mm.eg.db)
+library(ReactomePA)
+library(XML)
+library(annotate)
+library(ggplot2)
+library(Rcpp)
+library(RSQLite)
+library(cummeRbund)
+library(Gviz)
+library(Hmisc)
+library(biomaRt)
+library(clusterProfiler)
+library(DOSE)
+
+sessionInfo()
+```
+
+Before starting the working directory needs to be set to the folder where the files are located. 
+Read in the database that contains output of RNAseq experiment.
+It is also necessary to put the Gene transfer format (GTF) file into the same folder. Filename is 'UCSC_mm9_genes.gtf'
+
+```{r}
+getwd()
+setwd("C:/Users/Eva/OneDrive/Documents/POSTDOC/Projects/pge2/computer_analysis/RNAseq_jan17/diff_all_mm9") #depending if you have a Mac or PC use either '/' or '\'
+cuff <- readCufflinks(gtfFile="C:/Users/Eva/OneDrive/Documents/POSTDOC/Projects/pge2/computer_analysis/RNAseq_jan17/diff_all_mm9/UCSC_mm9_genes.gtf", genome="mm9")
+db <- DB(cuff)
+```
+
+Let's do a quick MDS (multidimensional scaling) to look at our samples. Looks like the replicates cluster pretty closely together. 
+More plots are awailable here: http://compbio.mit.edu/cummeRbund/manual_2_0.html
+
+
+```{r}
+genes.MDS.rep <- MDSplot(genes(cuff), replicates=T)
+genes.MDS.rep
+```
+
+
+Prepares the gene list, get all the gene names where there is a difference between ST and LT
+
+```{r}
+mySigTable_iso_05 <- getSigTable(cuff, alpha=0.05, level="isoforms")
+diff_STvsLT_iso <- mySigTable_iso_05[, "fresh_STvsfresh_LT"]
+cuffgenes_diff_STvsLT_iso <- names(diff_STvsLT_iso[which(diff_STvsLT_iso==1)])
+```
+Converts the Genenames to EntrezID (needed as an input into Clusterprofiler)
+```{r}
+
+listMarts()
+ensembl <- useMart("ensembl", dataset="mmusculus_gene_ensembl")
+attributes <- listAttributes(ensembl)
+
+cuffgenes_diff_STvsLT_iso_e <- getBM(attributes=c('entrezgene'), 
+      filters = 'refseq_mrna', 
+      values = cuffgenes_diff_STvsLT_iso, 
+      mart = ensembl)
+
+```
+
+
+apparently this website was helpful:
+https://davetang.org/muse/2013/11/25/thoughts-converting-gene-identifiers/
+
+# made the file into vector
+```{r}
+cuffgenes_diff_STvsLT_iso_ev <- cuffgenes_diff_STvsLT_iso_e[["entrezgene"]] 
+class(cuffgenes_diff_STvsLT_iso_ev)
+
+```
+do the pathway enrichment
+```{r}
+x <- enrichPathway(gene=cuffgenes_diff_STvsLT_iso_ev, organism = "mouse", pvalueCutoff=0.05, readable=T)
+PW_LTvsST_fresh <- x
+```
+
+
+```{r}
+barplot(PW_LTvsST_fresh, showCategory=5)
+enrichMap(x, layout=igraph::layout.kamada.kawai, vertex.label.cex = 1)
+```
+
+# how to get the actual expression files datafiles from the S4 object database
+
+```{r}
+isoform.fpkm <- fpkm(isoforms(cuff))
+head(isoform.fpkm)
+gene.diff <- diffData(genes(cuff))
+isoform.diff <- diffData(isoforms(cuff))
+```
+
+
+```{r}
+# only entries classified as statistically significant
+isoform.diff.sig <- subset(isoform.diff, significant=="yes")
+# make a new column for identifying
+isoform.diff.sig$othergroup <- paste(isoform.diff.sig$sample_1, isoform.diff.sig$sample_2, sep='_vs_')
+# make new column with upregulated and downregulated
+isoform.diff.sig <- isoform.diff.sig[abs(isoform.diff.sig$log2_fold_change) > 0,]
+isoform.diff.sig$group <- "upregulated"
+isoform.diff.sig$group[isoform.diff.sig$log2_fold_change < 0] <- "downregulated"
+# convert Refseq id to entrezID
+isoform.diff.sig.R = bitr(isoform.diff.sig$isoform_id, fromType="REFSEQ", toType="ENTREZID", OrgDb="org.Mm.eg.db")
+# renamed the column header
+colnames(isoform.diff.sig)[colnames(isoform.diff.sig)=="isoform_id"] <- "REFSEQ"
+# combined the key list and the dataframe
+isoform.diff.sig <- merge(isoform.diff.sig, isoform.diff.sig.R, by="REFSEQ")
+```
+
+
+# perform pathway enrichment on a subset of the total sample ('fresh cells')
+
+```{r}
+# selected only a subset of the comparisons
+isoform.diff.sig.fresh <- isoform.diff.sig[isoform.diff.sig$othergroup %in% c("fresh_LT_vs_fresh_MMP2", "fresh_ST_vs_fresh_LT", "fresh_MMP_vs_fresh_MMP2", "fresh_MMP_vs_fresh_LT", "fresh_ST_vs_fresh_MMP2", "fresh_MMP_vs_fresh_ST"),]
+#renamed the column header into Entrez
+colnames(isoform.diff.sig.fresh)[colnames(isoform.diff.sig.fresh)=="ENTREZID"] <- "Entrez"
+```
+
+
+Enrich by GO terms (GO over-representation test):
+
+```{r}
+isoform.diff.sig.fresh_enrichGO <- compareCluster(Entrez~group+othergroup, data=isoform.diff.sig.fresh, fun="enrichGO", OrgDb='org.Mm.eg.db')
+dotplot(isoform.diff.sig.fresh_enrichGO)
+dotplot(isoform.diff.sig.fresh_enrichGO, x=~group) + ggplot2::facet_grid(~othergroup)
+```
+
+Enrichment for Disease Ontology (DO) Semantic and Enrichment analysis ('enrichDO')
+
+```{r}
+isoform.diff.sig.fresh_enrichDO <- compareCluster(Entrez~group+othergroup, data=isoform.diff.sig.fresh, fun="enrichDO")
+dotplot(isoform.diff.sig.fresh_enrichDO)
+dotplot(isoform.diff.sig.fresh_enrichDO, x=~group) + ggplot2::facet_grid(~othergroup)
+
+```
+
+groupGO is designed for gene classification based on GO distribution at a specific level. 
+
+```{r}
+isoform.diff.sig.fresh_groupGO <- compareCluster(Entrez~group+othergroup, data=isoform.diff.sig.fresh, fun="groupGO", OrgDb='org.Mm.eg.db')
+dotplot(isoform.diff.sig.fresh_groupGO)
+dotplot(isoform.diff.sig.fresh_groupGO, x=~group) + ggplot2::facet_grid(~othergroup)
+```
+
+
+
+```{r}
+isoform.diff.sig.fresh_enrichPW <- compareCluster(Entrez~group+othergroup, data=isoform.diff.sig.fresh, fun="enrichPathway",organism ="mouse")
+dotplot(isoform.diff.sig.fresh_enrichPW)
+dotplot(isoform.diff.sig.fresh_enrichPW, x=~group) + ggplot2::facet_grid(~othergroup)
+```
+
+
