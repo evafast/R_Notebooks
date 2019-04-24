@@ -1,0 +1,122 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+The purpose of this notebook is to extract differential splicing data from an RNAseq experiment analyzed by the Tuxedo pipeline (tophat-cufflink-cuffdiff-CummeRbund). A gene list with genes that were expected to be differentially spliced were read into memory and differentially splicing as called by cuffdiff was analyzed. 
+
+Overview of the Cufflinks suite:
+http://cole-trapnell-lab.github.io/cufflinks/manual/
+
+More help on the CummeRbund R package.
+http://compbio.mit.edu/cummeRbund/manual_2_0.html
+(it's horribly outdated but that's what we use in the lab)
+
+This link also helped:
+https://scilifelab.github.io/courses/rnaseq/labs/CuffDiff
+
+Load some packages:
+```{r}
+source("https://bioconductor.org/biocLite.R")
+biocLite(c("digest", "data.table", "scales", "stringi"))
+
+library(digest)
+library(AnnotationDbi)
+library(org.Hs.eg.db)
+library(data.table)
+library(XML)
+library(annotate)
+library(scales)
+library(ggplot2)
+library(stringi)
+library(Hmisc)
+library(biomaRt)
+library(clusterProfiler)
+library(DOSE)
+library(Rcpp)
+library(RSQLite)
+library(cummeRbund)
+library(tidyverse)
+library(Gviz)
+library(rlang)
+library(ReactomePA)
+
+sessionInfo()
+```
+
+
+Before starting the working directory needs to be set to the folder where the files are located. Read in the cuffdiff output files and builds a SQLlite database int the backend (for easy access of the data). It is also necessary to put the Gene transfer format (GTF) file into the same folder. Filename is 'hg19.genes.gtf'
+
+```{r}
+setwd("C:/Users/Eva/OneDrive/Documents/POSTDOC/Projects/pge2/computer_analysis/cristina/diff_24hrs_hg19")
+cuff <- readCufflinks(gtfFile="C:/Users/Eva/OneDrive/Documents/POSTDOC/Projects/pge2/computer_analysis/cristina/diff_24hrs_hg19/hg19.genes.gtf",genome="hg19", rebuild = FALSE)
+# if database exists then can write "FALSE" otherwise TRUE, this rebuilds the database
+db <- DB(cuff) 
+cuff
+
+```
+
+Plot an MDS plot for easy visualization of the samples in low dimensional space
+```{r}
+genes.MDS.rep<-MDSplot(genes(cuff), replicates=T)
+genes.MDS.rep
+```
+
+
+Read in a file with genes we expect to be differentially spliced.
+```{r}
+setwd("C:/Users/Eva/OneDrive/Documents/POSTDOC/Projects/pge2/computer_analysis/cristina/diff_24hrs_hg19")
+groseqA77 <- read.csv('splicing.csv', header = TRUE, sep = ",")
+```
+
+Converted the GeneIDs
+```{r}
+# convert EnsembleID to gene name
+listMarts()
+mart = useMart('ensembl')
+listDatasets(mart)
+ensembl <- useMart("ensembl",dataset="hsapiens_gene_ensembl")
+attributes <- listAttributes(ensembl)
+
+# converted the ensembl ids to gene symbols
+A77_gros <- getBM(attributes=c('hgnc_symbol'),
+      filters = 'ensembl_gene_id',
+      values = groseqA77,
+      mart = ensembl)
+```
+
+
+Make a vector of the genes that are of interested. Create a smaller database only containing information on these genes. Print all the slots to get an idea of the structure of the object. 
+```{r}
+A77_gros_v <- A77_gros$hgnc_symbol # made a vector from the data frame
+groseq_rna <- getGenes(cuff, A77_gros_v) # gets all the elements from the cuff dataset for the genes from the groseq
+
+slotNames(groseq_rna)
+str(groseq_rna) # this is a good function to look at all the slots
+```
+
+Select different tables from the reduced S4 object and select genes
+```{r}
+# made different tables with these genes
+splicing_groseq <- groseq_rna@splicing@diff # select the differentially spliced table
+Sigsplicing <- subset(splicing_groseq, significant == "yes" ) # make subset of genes where splicing is "significantly different"
+Sigpromoters <- subset(groseq_rna@promoters@diff, significant == "yes" ) # make subset of genes where promotor usage is "significantly different"
+Sigisoforms <- subset(groseq_rna@isoforms@diff, significant == "yes" ) # make subset of genes where isoform usage is "significantly different"
+Siggenes <- subset(groseq_rna@diff, significant == "yes" ) # make subset of genes where gene expression is "significantly different"
+```
+
+This is only the list of genes that are different between the conditions that we are interested in
+```{r}
+Siggenes_A77_DMSO <- subset(Siggenes, sample_1 == "A771726_24hrs" & sample_2 == "dmso_24hrs" ) # got the list of genes that are different between dmso and A77
+```
+
+This is extracting all of the splicing data not only the one pertaining to the gene list.
+```{r}
+### these are all the genes that show differential splicing
+splicing_all <- tbl(db, "splicingDiffData")
+splicing_all1 <- splicing_all %>% collect() # this collects the data into a dataframe
+
+write.csv(splicing_all1, file = "Splicing_all_24h.csv")
+write.csv(splicing_groseq, file ="splicing_groseq_overlap_24h.csv")
+```
+
